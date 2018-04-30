@@ -1,0 +1,836 @@
+        -:    0:Source:fdwatch.c
+        -:    0:Programs:7
+        -:    1:/* fdwatch.c - fd watcher routines, either select() or poll()
+        -:    2:**
+        -:    3:** Copyright © 1999,2000 by Jef Poskanzer <jef@mail.acme.com>.
+        -:    4:** All rights reserved.
+        -:    5:**
+        -:    6:** Redistribution and use in source and binary forms, with or without
+        -:    7:** modification, are permitted provided that the following conditions
+        -:    8:** are met:
+        -:    9:** 1. Redistributions of source code must retain the above copyright
+        -:   10:**    notice, this list of conditions and the following disclaimer.
+        -:   11:** 2. Redistributions in binary form must reproduce the above copyright
+        -:   12:**    notice, this list of conditions and the following disclaimer in the
+        -:   13:**    documentation and/or other materials provided with the distribution.
+        -:   14:**
+        -:   15:** THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+        -:   16:** ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+        -:   17:** IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+        -:   18:** ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+        -:   19:** FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+        -:   20:** DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+        -:   21:** OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+        -:   22:** HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+        -:   23:** LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+        -:   24:** OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+        -:   25:** SUCH DAMAGE.
+        -:   26:*/
+        -:   27:
+        -:   28:#include <sys/types.h>
+        -:   29:#include <stdlib.h>
+        -:   30:#include <unistd.h>
+        -:   31:#include <string.h>
+        -:   32:#include <sys/time.h>
+        -:   33:#include <sys/resource.h>
+        -:   34:#include <syslog.h>
+        -:   35:#include <fcntl.h>
+        -:   36:
+        -:   37:#ifndef MIN
+        -:   38:#define MIN(a,b) ((a) < (b) ? (a) : (b))
+        -:   39:#endif
+        -:   40:
+        -:   41:#ifdef HAVE_POLL_H
+        -:   42:#include <poll.h>
+        -:   43:#else /* HAVE_POLL_H */
+        -:   44:#ifdef HAVE_SYS_POLL_H
+        -:   45:#include <sys/poll.h>
+        -:   46:#endif /* HAVE_SYS_POLL_H */
+        -:   47:#endif /* HAVE_POLL_H */
+        -:   48:
+        -:   49:#ifdef HAVE_SYS_DEVPOLL_H
+        -:   50:#include <sys/devpoll.h>
+        -:   51:#ifndef HAVE_DEVPOLL
+        -:   52:#define HAVE_DEVPOLL
+        -:   53:#endif /* !HAVE_DEVPOLL */
+        -:   54:#endif /* HAVE_SYS_DEVPOLL_H */
+        -:   55:
+        -:   56:#ifdef HAVE_SYS_EVENT_H
+        -:   57:#include <sys/event.h>
+        -:   58:#endif /* HAVE_SYS_EVENT_H */
+        -:   59:
+        -:   60:#include "fdwatch.h"
+        -:   61:
+        -:   62:#ifdef HAVE_SELECT
+        -:   63:#ifndef FD_SET
+        -:   64:#define NFDBITS         32
+        -:   65:#define FD_SETSIZE      32
+        -:   66:#define FD_SET(n, p)    ((p)->fds_bits[(n)/NFDBITS] |= (1 << ((n) % NFDBITS)))
+        -:   67:#define FD_CLR(n, p)    ((p)->fds_bits[(n)/NFDBITS] &= ~(1 << ((n) % NFDBITS)))
+        -:   68:#define FD_ISSET(n, p)  ((p)->fds_bits[(n)/NFDBITS] & (1 << ((n) % NFDBITS)))
+        -:   69:#define FD_ZERO(p)      bzero((char*)(p), sizeof(*(p)))
+        -:   70:#endif /* !FD_SET */
+        -:   71:#endif /* HAVE_SELECT */
+        -:   72:
+        -:   73:static int nfiles;
+        -:   74:static long nwatches;
+        -:   75:static int* fd_rw;
+        -:   76:static void** fd_data;
+        -:   77:static int nreturned, next_ridx;
+        -:   78:
+        -:   79:#ifdef HAVE_KQUEUE
+        -:   80:
+        -:   81:#define WHICH                  "kevent"
+        -:   82:#define INIT( nf )         kqueue_init( nf )
+        -:   83:#define ADD_FD( fd, rw )       kqueue_add_fd( fd, rw )
+        -:   84:#define DEL_FD( fd )           kqueue_del_fd( fd )
+        -:   85:#define WATCH( timeout_msecs ) kqueue_watch( timeout_msecs )
+        -:   86:#define CHECK_FD( fd )         kqueue_check_fd( fd )
+        -:   87:#define GET_FD( ridx )         kqueue_get_fd( ridx )
+        -:   88:
+        -:   89:static int kqueue_init( int nf );
+        -:   90:static void kqueue_add_fd( int fd, int rw );
+        -:   91:static void kqueue_del_fd( int fd );
+        -:   92:static int kqueue_watch( long timeout_msecs );
+        -:   93:static int kqueue_check_fd( int fd );
+        -:   94:static int kqueue_get_fd( int ridx );
+        -:   95:
+        -:   96:#else /* HAVE_KQUEUE */
+        -:   97:# ifdef HAVE_DEVPOLL
+        -:   98:
+        -:   99:#define WHICH                  "devpoll"
+        -:  100:#define INIT( nf )         devpoll_init( nf )
+        -:  101:#define ADD_FD( fd, rw )       devpoll_add_fd( fd, rw )
+        -:  102:#define DEL_FD( fd )           devpoll_del_fd( fd )
+        -:  103:#define WATCH( timeout_msecs ) devpoll_watch( timeout_msecs )
+        -:  104:#define CHECK_FD( fd )         devpoll_check_fd( fd )
+        -:  105:#define GET_FD( ridx )         devpoll_get_fd( ridx )
+        -:  106:
+        -:  107:static int devpoll_init( int nf );
+        -:  108:static void devpoll_add_fd( int fd, int rw );
+        -:  109:static void devpoll_del_fd( int fd );
+        -:  110:static int devpoll_watch( long timeout_msecs );
+        -:  111:static int devpoll_check_fd( int fd );
+        -:  112:static int devpoll_get_fd( int ridx );
+        -:  113:
+        -:  114:# else /* HAVE_DEVPOLL */
+        -:  115:#  ifdef HAVE_POLL
+        -:  116:
+        -:  117:#define WHICH                  "poll"
+        -:  118:#define INIT( nf )         poll_init( nf )
+        -:  119:#define ADD_FD( fd, rw )       poll_add_fd( fd, rw )
+        -:  120:#define DEL_FD( fd )           poll_del_fd( fd )
+        -:  121:#define WATCH( timeout_msecs ) poll_watch( timeout_msecs )
+        -:  122:#define CHECK_FD( fd )         poll_check_fd( fd )
+        -:  123:#define GET_FD( ridx )         poll_get_fd( ridx )
+        -:  124:
+        -:  125:static int poll_init( int nf );
+        -:  126:static void poll_add_fd( int fd, int rw );
+        -:  127:static void poll_del_fd( int fd );
+        -:  128:static int poll_watch( long timeout_msecs );
+        -:  129:static int poll_check_fd( int fd );
+        -:  130:static int poll_get_fd( int ridx );
+        -:  131:
+        -:  132:#  else /* HAVE_POLL */
+        -:  133:#   ifdef HAVE_SELECT
+        -:  134:
+        -:  135:#define WHICH                  "select"
+        -:  136:#define INIT( nf )         select_init( nf )
+        -:  137:#define ADD_FD( fd, rw )       select_add_fd( fd, rw )
+        -:  138:#define DEL_FD( fd )           select_del_fd( fd )
+        -:  139:#define WATCH( timeout_msecs ) select_watch( timeout_msecs )
+        -:  140:#define CHECK_FD( fd )         select_check_fd( fd )
+        -:  141:#define GET_FD( ridx )         select_get_fd( ridx )
+        -:  142:
+        -:  143:static int select_init( int nf );
+        -:  144:static void select_add_fd( int fd, int rw );
+        -:  145:static void select_del_fd( int fd );
+        -:  146:static int select_watch( long timeout_msecs );
+        -:  147:static int select_check_fd( int fd );
+        -:  148:static int select_get_fd( int ridx );
+        -:  149:
+        -:  150:#   endif /* HAVE_SELECT */
+        -:  151:#  endif /* HAVE_POLL */
+        -:  152:# endif /* HAVE_DEVPOLL */
+        -:  153:#endif /* HAVE_KQUEUE */
+        -:  154:
+        -:  155:
+        -:  156:/* Routines. */
+        -:  157:
+        -:  158:/* Figure out how many file descriptors the system allows, and
+        -:  159:** initialize the fdwatch data structures.  Returns -1 on failure.
+        -:  160:*/
+        -:  161:int
+    #####:  162:fdwatch_get_nfiles( void )
+        -:  163:    {
+        -:  164:    int i;
+        -:  165:#ifdef RLIMIT_NOFILE
+        -:  166:    struct rlimit rl;
+        -:  167:#endif /* RLIMIT_NOFILE */
+        -:  168:
+        -:  169:    /* Figure out how many fd's we can have. */
+    #####:  170:    nfiles = getdtablesize();
+        -:  171:#ifdef RLIMIT_NOFILE
+        -:  172:    /* If we have getrlimit(), use that, and attempt to raise the limit. */
+    #####:  173:    if ( getrlimit( RLIMIT_NOFILE, &rl ) == 0 )
+        -:  174:	{
+    #####:  175:	nfiles = rl.rlim_cur;
+    #####:  176:	if ( rl.rlim_max == RLIM_INFINITY )
+    #####:  177:	    rl.rlim_cur = 8192;         /* arbitrary */
+    #####:  178:	else if ( rl.rlim_max > rl.rlim_cur )
+    #####:  179:	    rl.rlim_cur = rl.rlim_max;
+    #####:  180:	if ( setrlimit( RLIMIT_NOFILE, &rl ) == 0 )
+    #####:  181:	    nfiles = rl.rlim_cur;
+        -:  182:	}
+        -:  183:#endif /* RLIMIT_NOFILE */
+        -:  184:
+        -:  185:#if defined(HAVE_SELECT) && ! ( defined(HAVE_POLL) || defined(HAVE_DEVPOLL) || defined(HAVE_KQUEUE) )
+        -:  186:    /* If we use select(), then we must limit ourselves to FD_SETSIZE. */
+        -:  187:    nfiles = MIN( nfiles, FD_SETSIZE );
+        -:  188:#endif /* HAVE_SELECT && ! ( HAVE_POLL || HAVE_DEVPOLL || HAVE_KQUEUE ) */
+        -:  189:
+        -:  190:    /* Initialize the fdwatch data structures. */
+    #####:  191:    nwatches = 0;
+    #####:  192:    fd_rw = (int*) malloc( sizeof(int) * nfiles );
+    #####:  193:    fd_data = (void**) malloc( sizeof(void*) * nfiles );
+    #####:  194:    if ( fd_rw == (int*) 0 || fd_data == (void**) 0 )
+    #####:  195:	return -1;
+    #####:  196:    for ( i = 0; i < nfiles; ++i )
+    #####:  197:	fd_rw[i] = -1;
+    #####:  198:    if ( INIT( nfiles ) == -1 )
+    #####:  199:	return -1;
+        -:  200:
+    #####:  201:    return nfiles;
+        -:  202:    }
+        -:  203:
+        -:  204:
+        -:  205:/* Add a descriptor to the watch list.  rw is either FDW_READ or FDW_WRITE.  */
+        -:  206:void
+    #####:  207:fdwatch_add_fd( int fd, void* client_data, int rw )
+        -:  208:    {
+    #####:  209:    if ( fd < 0 || fd >= nfiles || fd_rw[fd] != -1 )
+        -:  210:	{
+    #####:  211:	syslog( LOG_ERR, "bad fd (%d) passed to fdwatch_add_fd!", fd );
+    #####:  212:	return;
+        -:  213:	}
+    #####:  214:    ADD_FD( fd, rw );
+    #####:  215:    fd_rw[fd] = rw;
+    #####:  216:    fd_data[fd] = client_data;
+        -:  217:    }
+        -:  218:
+        -:  219:
+        -:  220:/* Remove a descriptor from the watch list. */
+        -:  221:void
+    #####:  222:fdwatch_del_fd( int fd )
+        -:  223:    {
+    #####:  224:    if ( fd < 0 || fd >= nfiles || fd_rw[fd] == -1 )
+        -:  225:	{
+    #####:  226:	syslog( LOG_ERR, "bad fd (%d) passed to fdwatch_del_fd!", fd );
+    #####:  227:	return;
+        -:  228:	}
+    #####:  229:    DEL_FD( fd );
+    #####:  230:    fd_rw[fd] = -1;
+    #####:  231:    fd_data[fd] = (void*) 0;
+        -:  232:    }
+        -:  233:
+        -:  234:/* Do the watch.  Return value is the number of descriptors that are ready,
+        -:  235:** or 0 if the timeout expired, or -1 on errors.  A timeout of INFTIM means
+        -:  236:** wait indefinitely.
+        -:  237:*/
+        -:  238:int
+    #####:  239:fdwatch( long timeout_msecs )
+        -:  240:    {
+    #####:  241:    ++nwatches;
+    #####:  242:    nreturned = WATCH( timeout_msecs );
+    #####:  243:    next_ridx = 0;
+    #####:  244:    return nreturned;
+        -:  245:    }
+        -:  246:
+        -:  247:
+        -:  248:/* Check if a descriptor was ready. */
+        -:  249:int
+    #####:  250:fdwatch_check_fd( int fd )
+        -:  251:    {
+    #####:  252:    if ( fd < 0 || fd >= nfiles || fd_rw[fd] == -1 )
+        -:  253:	{
+    #####:  254:	syslog( LOG_ERR, "bad fd (%d) passed to fdwatch_check_fd!", fd );
+    #####:  255:	return 0;
+        -:  256:	}
+    #####:  257:    return CHECK_FD( fd );
+        -:  258:    }
+        -:  259:
+        -:  260:
+        -:  261:void*
+    #####:  262:fdwatch_get_next_client_data( void )
+        -:  263:    {
+        -:  264:    int fd;
+        -:  265:
+    #####:  266:    if ( next_ridx >= nreturned )
+    #####:  267:	return (void*) -1;
+    #####:  268:    fd = GET_FD( next_ridx++ );
+    #####:  269:    if ( fd < 0 || fd >= nfiles )
+    #####:  270:	return (void*) 0;
+    #####:  271:    return fd_data[fd];
+        -:  272:    }
+        -:  273:
+        -:  274:
+        -:  275:/* Generate debugging statistics syslog message. */
+        -:  276:void
+    #####:  277:fdwatch_logstats( long secs )
+        -:  278:    {
+    #####:  279:    if ( secs > 0 )
+    #####:  280:	syslog(
+        -:  281:	    LOG_NOTICE, "  fdwatch - %ld %ss (%g/sec)",
+    #####:  282:	    nwatches, WHICH, (float) nwatches / secs );
+    #####:  283:    nwatches = 0;
+    #####:  284:    }
+        -:  285:
+        -:  286:
+        -:  287:#ifdef HAVE_KQUEUE
+        -:  288:
+        -:  289:static int maxkqevents;
+        -:  290:static struct kevent* kqevents;
+        -:  291:static int nkqevents;
+        -:  292:static struct kevent* kqrevents;
+        -:  293:static int* kqrfdidx;
+        -:  294:static int kq;
+        -:  295:
+        -:  296:
+        -:  297:static int
+        -:  298:kqueue_init( int nf )
+        -:  299:    {
+        -:  300:    kq = kqueue();
+        -:  301:    if ( kq == -1 )
+        -:  302:	return -1;
+        -:  303:    maxkqevents = nf * 2;
+        -:  304:    kqevents = (struct kevent*) malloc( sizeof(struct kevent) * maxkqevents );
+        -:  305:    kqrevents = (struct kevent*) malloc( sizeof(struct kevent) * nf );
+        -:  306:    kqrfdidx = (int*) malloc( sizeof(int) * nf );
+        -:  307:    if ( kqevents == (struct kevent*) 0 || kqrevents == (struct kevent*) 0 ||
+        -:  308:	 kqrfdidx == (int*) 0 )
+        -:  309:	return -1;
+        -:  310:    (void) memset( kqevents, 0, sizeof(struct kevent) * maxkqevents );
+        -:  311:    (void) memset( kqrfdidx, 0, sizeof(int) * nf );
+        -:  312:    return 0;
+        -:  313:    }
+        -:  314:
+        -:  315:
+        -:  316:static void
+        -:  317:kqueue_add_fd( int fd, int rw )
+        -:  318:    {
+        -:  319:    if ( nkqevents >= maxkqevents )
+        -:  320:	{
+        -:  321:	syslog( LOG_ERR, "too many kqevents in kqueue_add_fd!" );
+        -:  322:	return;
+        -:  323:	}
+        -:  324:    kqevents[nkqevents].ident = fd;
+        -:  325:    kqevents[nkqevents].flags = EV_ADD;
+        -:  326:    switch ( rw )
+        -:  327:	{
+        -:  328:	case FDW_READ: kqevents[nkqevents].filter = EVFILT_READ; break;
+        -:  329:	case FDW_WRITE: kqevents[nkqevents].filter = EVFILT_WRITE; break;
+        -:  330:	default: break;
+        -:  331:	}
+        -:  332:    ++nkqevents;
+        -:  333:    }
+        -:  334:
+        -:  335:
+        -:  336:static void
+        -:  337:kqueue_del_fd( int fd )
+        -:  338:    {
+        -:  339:    if ( nkqevents >= maxkqevents )
+        -:  340:	{
+        -:  341:	syslog( LOG_ERR, "too many kqevents in kqueue_del_fd!" );
+        -:  342:	return;
+        -:  343:	}
+        -:  344:    kqevents[nkqevents].ident = fd;
+        -:  345:    kqevents[nkqevents].flags = EV_DELETE;
+        -:  346:    switch ( fd_rw[fd] )
+        -:  347:	{
+        -:  348:	case FDW_READ: kqevents[nkqevents].filter = EVFILT_READ; break;
+        -:  349:	case FDW_WRITE: kqevents[nkqevents].filter = EVFILT_WRITE; break;
+        -:  350:	}
+        -:  351:    ++nkqevents;
+        -:  352:    }
+        -:  353:
+        -:  354:
+        -:  355:static int
+        -:  356:kqueue_watch( long timeout_msecs )
+        -:  357:    {
+        -:  358:    int i, r;
+        -:  359:
+        -:  360:    if ( timeout_msecs == INFTIM )
+        -:  361:	r = kevent(
+        -:  362:	    kq, kqevents, nkqevents, kqrevents, nfiles, (struct timespec*) 0 );
+        -:  363:    else
+        -:  364:	{
+        -:  365:	struct timespec ts;
+        -:  366:	ts.tv_sec = timeout_msecs / 1000L;
+        -:  367:	ts.tv_nsec = ( timeout_msecs % 1000L ) * 1000000L;
+        -:  368:	r = kevent( kq, kqevents, nkqevents, kqrevents, nfiles, &ts );
+        -:  369:	}
+        -:  370:    nkqevents = 0;
+        -:  371:    if ( r == -1 )
+        -:  372:	return -1;
+        -:  373:
+        -:  374:    for ( i = 0; i < r; ++i )
+        -:  375:	kqrfdidx[kqrevents[i].ident] = i;
+        -:  376:
+        -:  377:    return r;
+        -:  378:    }
+        -:  379:
+        -:  380:
+        -:  381:static int
+        -:  382:kqueue_check_fd( int fd )
+        -:  383:    {
+        -:  384:    int ridx = kqrfdidx[fd];
+        -:  385:
+        -:  386:    if ( ridx < 0 || ridx >= nfiles )
+        -:  387:	{
+        -:  388:	syslog( LOG_ERR, "bad ridx (%d) in kqueue_check_fd!", ridx );
+        -:  389:	return 0;
+        -:  390:	}
+        -:  391:    if ( ridx >= nreturned ) 
+        -:  392:	return 0;
+        -:  393:    if ( kqrevents[ridx].ident != fd )
+        -:  394:	return 0;
+        -:  395:    if ( kqrevents[ridx].flags & EV_ERROR )
+        -:  396:	return 0;
+        -:  397:    switch ( fd_rw[fd] )
+        -:  398:	{
+        -:  399:	case FDW_READ: return kqrevents[ridx].filter == EVFILT_READ;
+        -:  400:	case FDW_WRITE: return kqrevents[ridx].filter == EVFILT_WRITE;
+        -:  401:	default: return 0;
+        -:  402:	}
+        -:  403:    }
+        -:  404:
+        -:  405:
+        -:  406:static int
+        -:  407:kqueue_get_fd( int ridx )
+        -:  408:    {
+        -:  409:    if ( ridx < 0 || ridx >= nfiles )
+        -:  410:	{
+        -:  411:	syslog( LOG_ERR, "bad ridx (%d) in kqueue_get_fd!", ridx );
+        -:  412:	return -1;
+        -:  413:	}
+        -:  414:    return kqrevents[ridx].ident;
+        -:  415:    }
+        -:  416:
+        -:  417:#else /* HAVE_KQUEUE */
+        -:  418:
+        -:  419:
+        -:  420:# ifdef HAVE_DEVPOLL
+        -:  421:
+        -:  422:static int maxdpevents;
+        -:  423:static struct pollfd* dpevents;
+        -:  424:static int ndpevents;
+        -:  425:static struct pollfd* dprevents;
+        -:  426:static int* dp_rfdidx;
+        -:  427:static int dp;
+        -:  428:
+        -:  429:
+        -:  430:static int
+        -:  431:devpoll_init( int nf )
+        -:  432:    {
+        -:  433:    dp = open( "/dev/poll", O_RDWR );
+        -:  434:    if ( dp == -1 )
+        -:  435:	return -1;
+        -:  436:    (void) fcntl( dp, F_SETFD, 1 );
+        -:  437:    maxdpevents = nf * 2;
+        -:  438:    dpevents = (struct pollfd*) malloc( sizeof(struct pollfd) * maxdpevents );
+        -:  439:    dprevents = (struct pollfd*) malloc( sizeof(struct pollfd) * nf );
+        -:  440:    dp_rfdidx = (int*) malloc( sizeof(int) * nf );
+        -:  441:    if ( dpevents == (struct pollfd*) 0 || dprevents == (struct pollfd*) 0 ||
+        -:  442:	 dp_rfdidx == (int*) 0 )
+        -:  443:	return -1;
+        -:  444:    (void) memset( dp_rfdidx, 0, sizeof(int) * nf );
+        -:  445:    return 0;
+        -:  446:    }
+        -:  447:
+        -:  448:
+        -:  449:static void
+        -:  450:devpoll_add_fd( int fd, int rw )
+        -:  451:    {
+        -:  452:    if ( ndpevents >= maxdpevents )
+        -:  453:	{
+        -:  454:	syslog( LOG_ERR, "too many fds in devpoll_add_fd!" );
+        -:  455:	return;
+        -:  456:	}
+        -:  457:    dpevents[ndpevents].fd = fd;
+        -:  458:    switch ( rw )
+        -:  459:	{
+        -:  460:	case FDW_READ: dpevents[ndpevents].events = POLLIN; break;
+        -:  461:	case FDW_WRITE: dpevents[ndpevents].events = POLLOUT; break;
+        -:  462:	default: break;
+        -:  463:	}
+        -:  464:    ++ndpevents;
+        -:  465:    }
+        -:  466:
+        -:  467:
+        -:  468:static void
+        -:  469:devpoll_del_fd( int fd )
+        -:  470:    {
+        -:  471:    if ( ndpevents >= maxdpevents )
+        -:  472:	{
+        -:  473:	syslog( LOG_ERR, "too many fds in devpoll_del_fd!" );
+        -:  474:	return;
+        -:  475:	}
+        -:  476:    dpevents[ndpevents].fd = fd;
+        -:  477:    dpevents[ndpevents].events = POLLREMOVE;
+        -:  478:    ++ndpevents;
+        -:  479:    }
+        -:  480:
+        -:  481:
+        -:  482:static int
+        -:  483:devpoll_watch( long timeout_msecs )
+        -:  484:    {
+        -:  485:    int i, r;
+        -:  486:    struct dvpoll dvp;
+        -:  487:
+        -:  488:    r = sizeof(struct pollfd) * ndpevents;
+        -:  489:    if ( r > 0 && write( dp, dpevents, r ) != r )
+        -:  490:	return -1;
+        -:  491:
+        -:  492:    ndpevents = 0;
+        -:  493:    dvp.dp_fds = dprevents;
+        -:  494:    dvp.dp_nfds = nfiles;
+        -:  495:    dvp.dp_timeout = (int) timeout_msecs;
+        -:  496:
+        -:  497:    r = ioctl( dp, DP_POLL, &dvp );
+        -:  498:    if ( r == -1 )
+        -:  499:	return -1;
+        -:  500:
+        -:  501:    for ( i = 0; i < r; ++i )
+        -:  502:	dp_rfdidx[dprevents[i].fd] = i;
+        -:  503:
+        -:  504:    return r;
+        -:  505:    }
+        -:  506:
+        -:  507:
+        -:  508:static int
+        -:  509:devpoll_check_fd( int fd )
+        -:  510:    {
+        -:  511:    int ridx = dp_rfdidx[fd];
+        -:  512:
+        -:  513:    if ( ridx < 0 || ridx >= nfiles )
+        -:  514:	{
+        -:  515:	syslog( LOG_ERR, "bad ridx (%d) in devpoll_check_fd!", ridx );
+        -:  516:	return 0;
+        -:  517:	}
+        -:  518:    if ( ridx >= nreturned )
+        -:  519:	return 0;
+        -:  520:    if ( dprevents[ridx].fd != fd )
+        -:  521:	return 0;
+        -:  522:    if ( dprevents[ridx].revents & POLLERR )
+        -:  523:	return 0;
+        -:  524:    switch ( fd_rw[fd] )
+        -:  525:	{
+        -:  526:	case FDW_READ: return dprevents[ridx].revents & ( POLLIN | POLLHUP | POLLNVAL );
+        -:  527:	case FDW_WRITE: return dprevents[ridx].revents & ( POLLOUT | POLLHUP | POLLNVAL );
+        -:  528:	default: return 0;
+        -:  529:	}
+        -:  530:    }
+        -:  531:
+        -:  532:
+        -:  533:static int
+        -:  534:devpoll_get_fd( int ridx )
+        -:  535:    {
+        -:  536:    if ( ridx < 0 || ridx >= nfiles )
+        -:  537:	{
+        -:  538:	syslog( LOG_ERR, "bad ridx (%d) in devpoll_get_fd!", ridx );
+        -:  539:	return -1;
+        -:  540:	}
+        -:  541:    return dprevents[ridx].fd;
+        -:  542:    }
+        -:  543:
+        -:  544:
+        -:  545:# else /* HAVE_DEVPOLL */
+        -:  546:
+        -:  547:
+        -:  548:#  ifdef HAVE_POLL
+        -:  549:
+        -:  550:static struct pollfd* pollfds;
+        -:  551:static int npoll_fds;
+        -:  552:static int* poll_fdidx;
+        -:  553:static int* poll_rfdidx;
+        -:  554:
+        -:  555:
+        -:  556:static int
+    #####:  557:poll_init( int nf )
+        -:  558:    {
+        -:  559:    int i;
+        -:  560:
+    #####:  561:    pollfds = (struct pollfd*) malloc( sizeof(struct pollfd) * nf );
+    #####:  562:    poll_fdidx = (int*) malloc( sizeof(int) * nf );
+    #####:  563:    poll_rfdidx = (int*) malloc( sizeof(int) * nf );
+    #####:  564:    if ( pollfds == (struct pollfd*) 0 || poll_fdidx == (int*) 0 ||
+    #####:  565:	 poll_rfdidx == (int*) 0 )
+    #####:  566:	return -1;
+    #####:  567:    for ( i = 0; i < nf; ++i )
+    #####:  568:	pollfds[i].fd = poll_fdidx[i] = -1;
+    #####:  569:    return 0;
+        -:  570:    }
+        -:  571:
+        -:  572:
+        -:  573:static void
+    #####:  574:poll_add_fd( int fd, int rw )
+        -:  575:    {
+    #####:  576:    if ( npoll_fds >= nfiles )
+        -:  577:	{
+    #####:  578:	syslog( LOG_ERR, "too many fds in poll_add_fd!" );
+    #####:  579:	return;
+        -:  580:	}
+    #####:  581:    pollfds[npoll_fds].fd = fd;
+    #####:  582:    switch ( rw )
+        -:  583:	{
+    #####:  584:	case FDW_READ: pollfds[npoll_fds].events = POLLIN; break;
+    #####:  585:	case FDW_WRITE: pollfds[npoll_fds].events = POLLOUT; break;
+    #####:  586:	default: break;
+        -:  587:	}
+    #####:  588:    poll_fdidx[fd] = npoll_fds;
+    #####:  589:    ++npoll_fds;
+        -:  590:    }
+        -:  591:
+        -:  592:
+        -:  593:static void
+    #####:  594:poll_del_fd( int fd )
+        -:  595:    {
+    #####:  596:    int idx = poll_fdidx[fd];
+        -:  597:
+    #####:  598:    if ( idx < 0 || idx >= nfiles )
+        -:  599:	{
+    #####:  600:	syslog( LOG_ERR, "bad idx (%d) in poll_del_fd!", idx );
+    #####:  601:	return;
+        -:  602:	}
+    #####:  603:    --npoll_fds;
+    #####:  604:    pollfds[idx] = pollfds[npoll_fds];
+    #####:  605:    poll_fdidx[pollfds[idx].fd] = idx;
+    #####:  606:    pollfds[npoll_fds].fd = -1;
+    #####:  607:    poll_fdidx[fd] = -1;
+        -:  608:    }
+        -:  609:
+        -:  610:
+        -:  611:static int
+    #####:  612:poll_watch( long timeout_msecs )
+        -:  613:    {
+        -:  614:    int r, ridx, i;
+        -:  615:
+    #####:  616:    r = poll( pollfds, npoll_fds, (int) timeout_msecs );
+    #####:  617:    if ( r <= 0 )
+    #####:  618:	return r;
+        -:  619:
+    #####:  620:    ridx = 0;
+    #####:  621:    for ( i = 0; i < npoll_fds; ++i )
+    #####:  622:	if ( pollfds[i].revents &
+        -:  623:	     ( POLLIN | POLLOUT | POLLERR | POLLHUP | POLLNVAL ) )
+        -:  624:	    {
+    #####:  625:	    poll_rfdidx[ridx++] = pollfds[i].fd;
+    #####:  626:	    if ( ridx == r )
+    #####:  627:		break;
+        -:  628:	    }
+        -:  629:
+    #####:  630:    return ridx;	/* should be equal to r */
+        -:  631:    }
+        -:  632:
+        -:  633:
+        -:  634:static int
+    #####:  635:poll_check_fd( int fd )
+        -:  636:    {
+    #####:  637:    int fdidx = poll_fdidx[fd];
+        -:  638:
+    #####:  639:    if ( fdidx < 0 || fdidx >= nfiles )
+        -:  640:	{
+    #####:  641:	syslog( LOG_ERR, "bad fdidx (%d) in poll_check_fd!", fdidx );
+    #####:  642:	return 0;
+        -:  643:	}
+    #####:  644:    if ( pollfds[fdidx].revents & POLLERR )
+    #####:  645:	return 0;
+    #####:  646:    switch ( fd_rw[fd] )
+        -:  647:	{
+    #####:  648:	case FDW_READ: return pollfds[fdidx].revents & ( POLLIN | POLLHUP | POLLNVAL );
+    #####:  649:	case FDW_WRITE: return pollfds[fdidx].revents & ( POLLOUT | POLLHUP | POLLNVAL );
+    #####:  650:	default: return 0;
+        -:  651:	}
+        -:  652:    }
+        -:  653:
+        -:  654:
+        -:  655:static int
+    #####:  656:poll_get_fd( int ridx )
+        -:  657:    {
+    #####:  658:    if ( ridx < 0 || ridx >= nfiles )
+        -:  659:	{
+    #####:  660:	syslog( LOG_ERR, "bad ridx (%d) in poll_get_fd!", ridx );
+    #####:  661:	return -1;
+        -:  662:	}
+    #####:  663:    return poll_rfdidx[ridx];
+        -:  664:    }
+        -:  665:
+        -:  666:#  else /* HAVE_POLL */
+        -:  667:
+        -:  668:
+        -:  669:#   ifdef HAVE_SELECT
+        -:  670:
+        -:  671:static fd_set master_rfdset;
+        -:  672:static fd_set master_wfdset;
+        -:  673:static fd_set working_rfdset;
+        -:  674:static fd_set working_wfdset;
+        -:  675:static int* select_fds;
+        -:  676:static int* select_fdidx;
+        -:  677:static int* select_rfdidx;
+        -:  678:static int nselect_fds;
+        -:  679:static int maxfd;
+        -:  680:static int maxfd_changed;
+        -:  681:
+        -:  682:
+        -:  683:static int
+        -:  684:select_init( int nf )
+        -:  685:    {
+        -:  686:    int i;
+        -:  687:
+        -:  688:    FD_ZERO( &master_rfdset );
+        -:  689:    FD_ZERO( &master_wfdset );
+        -:  690:    select_fds = (int*) malloc( sizeof(int) * nf );
+        -:  691:    select_fdidx = (int*) malloc( sizeof(int) * nf );
+        -:  692:    select_rfdidx = (int*) malloc( sizeof(int) * nf );
+        -:  693:    if ( select_fds == (int*) 0 || select_fdidx == (int*) 0 ||
+        -:  694:	 select_rfdidx == (int*) 0 )
+        -:  695:	return -1;
+        -:  696:    nselect_fds = 0;
+        -:  697:    maxfd = -1;
+        -:  698:    maxfd_changed = 0;
+        -:  699:    for ( i = 0; i < nf; ++i )
+        -:  700:	select_fds[i] = select_fdidx[i] = -1;
+        -:  701:    return 0;
+        -:  702:    }
+        -:  703:
+        -:  704:
+        -:  705:static void
+        -:  706:select_add_fd( int fd, int rw )
+        -:  707:    {
+        -:  708:    if ( nselect_fds >= nfiles )
+        -:  709:	{
+        -:  710:	syslog( LOG_ERR, "too many fds in select_add_fd!" );
+        -:  711:	return;
+        -:  712:	}
+        -:  713:    select_fds[nselect_fds] = fd;
+        -:  714:    switch ( rw )
+        -:  715:	{
+        -:  716:	case FDW_READ: FD_SET( fd, &master_rfdset ); break;
+        -:  717:	case FDW_WRITE: FD_SET( fd, &master_wfdset ); break;
+        -:  718:	default: break;
+        -:  719:	}
+        -:  720:    if ( fd > maxfd )
+        -:  721:	maxfd = fd;
+        -:  722:    select_fdidx[fd] = nselect_fds;
+        -:  723:    ++nselect_fds;
+        -:  724:    }
+        -:  725:
+        -:  726:
+        -:  727:static void
+        -:  728:select_del_fd( int fd )
+        -:  729:    {
+        -:  730:    int idx = select_fdidx[fd];
+        -:  731:
+        -:  732:    if ( idx < 0 || idx >= nfiles )
+        -:  733:	{
+        -:  734:	syslog( LOG_ERR, "bad idx (%d) in select_del_fd!", idx );
+        -:  735:	return;
+        -:  736:	}
+        -:  737:
+        -:  738:    --nselect_fds;
+        -:  739:    select_fds[idx] = select_fds[nselect_fds];
+        -:  740:    select_fdidx[select_fds[idx]] = idx;
+        -:  741:    select_fds[nselect_fds] = -1;
+        -:  742:    select_fdidx[fd] = -1;
+        -:  743:
+        -:  744:    FD_CLR( fd, &master_rfdset );
+        -:  745:    FD_CLR( fd, &master_wfdset );
+        -:  746:
+        -:  747:    if ( fd >= maxfd )
+        -:  748:	maxfd_changed = 1;
+        -:  749:    }
+        -:  750:
+        -:  751:
+        -:  752:static int
+        -:  753:select_get_maxfd( void )
+        -:  754:    {
+        -:  755:    if ( maxfd_changed )
+        -:  756:	{
+        -:  757:	int i;
+        -:  758:	maxfd = -1;
+        -:  759:	for ( i = 0; i < nselect_fds; ++i )
+        -:  760:	    if ( select_fds[i] > maxfd )
+        -:  761:		maxfd = select_fds[i];
+        -:  762:	maxfd_changed = 0;
+        -:  763:	}
+        -:  764:    return maxfd;
+        -:  765:    }
+        -:  766:
+        -:  767:
+        -:  768:static int
+        -:  769:select_watch( long timeout_msecs )
+        -:  770:    {
+        -:  771:    int mfd;
+        -:  772:    int r, idx, ridx;
+        -:  773:
+        -:  774:    working_rfdset = master_rfdset;
+        -:  775:    working_wfdset = master_wfdset;
+        -:  776:    mfd = select_get_maxfd();
+        -:  777:    if ( timeout_msecs == INFTIM )
+        -:  778:       r = select(
+        -:  779:           mfd + 1, &working_rfdset, &working_wfdset, (fd_set*) 0,
+        -:  780:           (struct timeval*) 0 );
+        -:  781:    else
+        -:  782:	{
+        -:  783:	struct timeval timeout;
+        -:  784:	timeout.tv_sec = timeout_msecs / 1000L;
+        -:  785:	timeout.tv_usec = ( timeout_msecs % 1000L ) * 1000L;
+        -:  786:	r = select(
+        -:  787:	   mfd + 1, &working_rfdset, &working_wfdset, (fd_set*) 0, &timeout );
+        -:  788:	}
+        -:  789:    if ( r <= 0 )
+        -:  790:	return r;
+        -:  791:
+        -:  792:    ridx = 0;
+        -:  793:    for ( idx = 0; idx < nselect_fds; ++idx )
+        -:  794:	if ( select_check_fd( select_fds[idx] ) )
+        -:  795:	    {
+        -:  796:	    select_rfdidx[ridx++] = select_fds[idx];
+        -:  797:	    if ( ridx == r )
+        -:  798:		break;
+        -:  799:	    }
+        -:  800:
+        -:  801:    return ridx;	/* should be equal to r */
+        -:  802:    }
+        -:  803:
+        -:  804:
+        -:  805:static int
+        -:  806:select_check_fd( int fd )
+        -:  807:    {
+        -:  808:    switch ( fd_rw[fd] )
+        -:  809:	{
+        -:  810:	case FDW_READ: return FD_ISSET( fd, &working_rfdset );
+        -:  811:	case FDW_WRITE: return FD_ISSET( fd, &working_wfdset );
+        -:  812:	default: return 0;
+        -:  813:	}
+        -:  814:    }
+        -:  815:
+        -:  816:
+        -:  817:static int
+        -:  818:select_get_fd( int ridx )
+        -:  819:    {
+        -:  820:    if ( ridx < 0 || ridx >= nfiles )
+        -:  821:	{
+        -:  822:	syslog( LOG_ERR, "bad ridx (%d) in select_get_fd!", ridx );
+        -:  823:	return -1;
+        -:  824:	}
+        -:  825:    return select_rfdidx[ridx];
+        -:  826:    }
+        -:  827:
+        -:  828:#   endif /* HAVE_SELECT */
+        -:  829:
+        -:  830:#  endif /* HAVE_POLL */
+        -:  831:
+        -:  832:# endif /* HAVE_DEVPOLL */
+        -:  833:
+        -:  834:#endif /* HAVE_KQUEUE */

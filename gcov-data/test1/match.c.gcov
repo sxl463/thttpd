@@ -1,0 +1,90 @@
+        -:    0:Source:match.c
+        -:    0:Programs:7
+        -:    1:/* match.c - simple shell-style filename matcher
+        -:    2:**
+        -:    3:** Only does ? * and **, and multiple patterns separated by |.  Returns 1 or 0.
+        -:    4:**
+        -:    5:** Copyright © 1995,2000 by Jef Poskanzer <jef@mail.acme.com>.
+        -:    6:** All rights reserved.
+        -:    7:**
+        -:    8:** Redistribution and use in source and binary forms, with or without
+        -:    9:** modification, are permitted provided that the following conditions
+        -:   10:** are met:
+        -:   11:** 1. Redistributions of source code must retain the above copyright
+        -:   12:**    notice, this list of conditions and the following disclaimer.
+        -:   13:** 2. Redistributions in binary form must reproduce the above copyright
+        -:   14:**    notice, this list of conditions and the following disclaimer in the
+        -:   15:**    documentation and/or other materials provided with the distribution.
+        -:   16:**
+        -:   17:** THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+        -:   18:** ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+        -:   19:** IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+        -:   20:** ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+        -:   21:** FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+        -:   22:** DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+        -:   23:** OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+        -:   24:** HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+        -:   25:** LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+        -:   26:** OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+        -:   27:** SUCH DAMAGE.
+        -:   28:*/
+        -:   29:
+        -:   30:
+        -:   31:#include <string.h>
+        -:   32:
+        -:   33:#include "match.h"
+        -:   34:
+        -:   35:static int match_one( const char* pattern, int patternlen, const char* string );
+        -:   36:
+        -:   37:int
+    #####:   38:match( const char* pattern, const char* string )
+        -:   39:    {
+        -:   40:    const char* or;
+        -:   41:
+        -:   42:    for (;;)
+        -:   43:	{
+    #####:   44:	or = strchr( pattern, '|' );
+    #####:   45:	if ( or == (char*) 0 )
+    #####:   46:	    return match_one( pattern, strlen( pattern ), string );
+    #####:   47:	if ( match_one( pattern, or - pattern, string ) )
+    #####:   48:	    return 1;
+    #####:   49:	pattern = or + 1;
+    #####:   50:	}
+        -:   51:    }
+        -:   52:
+        -:   53:
+        -:   54:static int
+    #####:   55:match_one( const char* pattern, int patternlen, const char* string )
+        -:   56:    {
+        -:   57:    const char* p;
+        -:   58:
+    #####:   59:    for ( p = pattern; p - pattern < patternlen; ++p, ++string )
+        -:   60:	{
+    #####:   61:	if ( *p == '?' && *string != '\0' )
+    #####:   62:	    continue;
+    #####:   63:	if ( *p == '*' )
+        -:   64:	    {
+        -:   65:	    int i, pl;
+    #####:   66:	    ++p;
+    #####:   67:	    if ( *p == '*' )
+        -:   68:		{
+        -:   69:		/* Double-wildcard matches anything. */
+    #####:   70:		++p;
+    #####:   71:		i = strlen( string );
+        -:   72:		}
+        -:   73:	    else
+        -:   74:		/* Single-wildcard matches anything but slash. */
+    #####:   75:		i = strcspn( string, "/" );
+    #####:   76:	    pl = patternlen - ( p - pattern );
+    #####:   77:	    for ( ; i >= 0; --i )
+    #####:   78:		if ( match_one( p, pl, &(string[i]) ) )
+    #####:   79:		    return 1;
+    #####:   80:	    return 0;
+        -:   81:	    }
+    #####:   82:	if ( *p != *string )
+    #####:   83:	    return 0;
+        -:   84:	}
+    #####:   85:    if ( *string == '\0' )
+    #####:   86:	return 1;
+    #####:   87:    return 0;
+        -:   88:    }

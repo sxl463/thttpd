@@ -1,0 +1,330 @@
+        -:    0:Source:tdate_parse.c
+        -:    0:Programs:7
+        -:    1:/* tdate_parse - parse string dates into internal form, stripped-down version
+        -:    2:**
+        -:    3:** Copyright © 1995 by Jef Poskanzer <jef@mail.acme.com>.
+        -:    4:** All rights reserved.
+        -:    5:**
+        -:    6:** Redistribution and use in source and binary forms, with or without
+        -:    7:** modification, are permitted provided that the following conditions
+        -:    8:** are met:
+        -:    9:** 1. Redistributions of source code must retain the above copyright
+        -:   10:**    notice, this list of conditions and the following disclaimer.
+        -:   11:** 2. Redistributions in binary form must reproduce the above copyright
+        -:   12:**    notice, this list of conditions and the following disclaimer in the
+        -:   13:**    documentation and/or other materials provided with the distribution.
+        -:   14:**
+        -:   15:** THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+        -:   16:** ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+        -:   17:** IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+        -:   18:** ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+        -:   19:** FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+        -:   20:** DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+        -:   21:** OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+        -:   22:** HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+        -:   23:** LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+        -:   24:** OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+        -:   25:** SUCH DAMAGE.
+        -:   26:*/
+        -:   27:
+        -:   28:/* This is a stripped-down version of date_parse.c, available at
+        -:   29:** http://www.acme.com/software/date_parse/
+        -:   30:*/
+        -:   31:
+        -:   32:#include <sys/types.h>
+        -:   33:
+        -:   34:#include <ctype.h>
+        -:   35:#ifdef HAVE_MEMORY_H
+        -:   36:#include <memory.h>
+        -:   37:#endif
+        -:   38:#include <stdio.h>
+        -:   39:#include <stdlib.h>
+        -:   40:#include <string.h>
+        -:   41:#include <time.h>
+        -:   42:
+        -:   43:#include "tdate_parse.h"
+        -:   44:
+        -:   45:
+        -:   46:struct strlong {
+        -:   47:    char* s;
+        -:   48:    long l;
+        -:   49:    };
+        -:   50:
+        -:   51:
+        -:   52:static void
+    #####:   53:pound_case( char* str )
+        -:   54:    {
+    #####:   55:    for ( ; *str != '\0'; ++str )
+        -:   56:	{
+    #####:   57:	if ( isupper( (int) *str ) )
+    #####:   58:	    *str = tolower( (int) *str );
+        -:   59:	}
+    #####:   60:    }
+        -:   61:
+        -:   62:
+        -:   63:static int
+    #####:   64:strlong_compare( const void* v1, const void* v2 )
+        -:   65:    {
+    #####:   66:    const struct strlong* s1 = (const struct strlong*) v1;
+    #####:   67:    const struct strlong* s2 = (const struct strlong*) v2;
+    #####:   68:    return strcmp( s1->s, s2->s );
+        -:   69:    }
+        -:   70:
+        -:   71:
+        -:   72:static int
+    #####:   73:strlong_search( char* str, struct strlong* tab, int n, long* lP )
+        -:   74:    {
+        -:   75:    int i, h, l, r;
+        -:   76:
+    #####:   77:    l = 0;
+    #####:   78:    h = n - 1;
+        -:   79:    for (;;)
+        -:   80:	{
+    #####:   81:	i = ( h + l ) / 2;
+    #####:   82:	r = strcmp( str, tab[i].s );
+    #####:   83:	if ( r < 0 )
+    #####:   84:	    h = i - 1;
+    #####:   85:	else if ( r > 0 )
+    #####:   86:	    l = i + 1;
+        -:   87:	else
+        -:   88:	    {
+    #####:   89:	    *lP = tab[i].l;
+    #####:   90:	    return 1;
+        -:   91:	    }
+    #####:   92:	if ( h < l )
+    #####:   93:	    return 0;
+    #####:   94:	}
+        -:   95:    }
+        -:   96:
+        -:   97:
+        -:   98:static int
+    #####:   99:scan_wday( char* str_wday, long* tm_wdayP )
+        -:  100:    {
+        -:  101:    static struct strlong wday_tab[] = {
+        -:  102:	{ "sun", 0 }, { "sunday", 0 },
+        -:  103:	{ "mon", 1 }, { "monday", 1 },
+        -:  104:	{ "tue", 2 }, { "tuesday", 2 },
+        -:  105:	{ "wed", 3 }, { "wednesday", 3 },
+        -:  106:	{ "thu", 4 }, { "thursday", 4 },
+        -:  107:	{ "fri", 5 }, { "friday", 5 },
+        -:  108:	{ "sat", 6 }, { "saturday", 6 },
+        -:  109:	};
+        -:  110:    static int sorted = 0;
+        -:  111:
+    #####:  112:    if ( ! sorted )
+        -:  113:	{
+    #####:  114:	(void) qsort(
+        -:  115:	    wday_tab, sizeof(wday_tab)/sizeof(struct strlong),
+        -:  116:	    sizeof(struct strlong), strlong_compare );
+    #####:  117:	sorted = 1;
+        -:  118:	}
+    #####:  119:    pound_case( str_wday );
+    #####:  120:    return strlong_search(
+        -:  121:	str_wday, wday_tab, sizeof(wday_tab)/sizeof(struct strlong), tm_wdayP );
+        -:  122:    }
+        -:  123:
+        -:  124:
+        -:  125:static int
+    #####:  126:scan_mon( char* str_mon, long* tm_monP )
+        -:  127:    {
+        -:  128:    static struct strlong mon_tab[] = {
+        -:  129:	{ "jan", 0 }, { "january", 0 },
+        -:  130:	{ "feb", 1 }, { "february", 1 },
+        -:  131:	{ "mar", 2 }, { "march", 2 },
+        -:  132:	{ "apr", 3 }, { "april", 3 },
+        -:  133:	{ "may", 4 },
+        -:  134:	{ "jun", 5 }, { "june", 5 },
+        -:  135:	{ "jul", 6 }, { "july", 6 },
+        -:  136:	{ "aug", 7 }, { "august", 7 },
+        -:  137:	{ "sep", 8 }, { "september", 8 },
+        -:  138:	{ "oct", 9 }, { "october", 9 },
+        -:  139:	{ "nov", 10 }, { "november", 10 },
+        -:  140:	{ "dec", 11 }, { "december", 11 },
+        -:  141:	};
+        -:  142:    static int sorted = 0;
+        -:  143:
+    #####:  144:    if ( ! sorted )
+        -:  145:	{
+    #####:  146:	(void) qsort(
+        -:  147:	    mon_tab, sizeof(mon_tab)/sizeof(struct strlong),
+        -:  148:	    sizeof(struct strlong), strlong_compare );
+    #####:  149:	sorted = 1;
+        -:  150:	}
+    #####:  151:    pound_case( str_mon );
+    #####:  152:    return strlong_search(
+        -:  153:	str_mon, mon_tab, sizeof(mon_tab)/sizeof(struct strlong), tm_monP );
+        -:  154:    }
+        -:  155:
+        -:  156:
+        -:  157:static int
+    #####:  158:is_leap( int year )
+        -:  159:    {
+    #####:  160:    return year % 400? ( year % 100 ? ( year % 4 ? 0 : 1 ) : 0 ) : 1;
+        -:  161:    }
+        -:  162:
+        -:  163:
+        -:  164:/* Basically the same as mktime(). */
+        -:  165:static time_t
+    #####:  166:tm_to_time( struct tm* tmP )
+        -:  167:    {
+        -:  168:    time_t t;
+        -:  169:    static int monthtab[12] = {
+        -:  170:	0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+        -:  171:
+        -:  172:    /* Years since epoch, converted to days. */
+    #####:  173:    t = ( tmP->tm_year - 70 ) * 365;
+        -:  174:    /* Leap days for previous years - this will break in 2100! */
+    #####:  175:    t += ( tmP->tm_year - 69 ) / 4;
+        -:  176:    /* Days for the beginning of this month. */
+    #####:  177:    t += monthtab[tmP->tm_mon];
+        -:  178:    /* Leap day for this year. */
+    #####:  179:    if ( tmP->tm_mon >= 2 && is_leap( tmP->tm_year + 1900 ) )
+    #####:  180:	++t;
+        -:  181:    /* Days since the beginning of this month. */
+    #####:  182:    t += tmP->tm_mday - 1;	/* 1-based field */
+        -:  183:    /* Hours, minutes, and seconds. */
+    #####:  184:    t = t * 24 + tmP->tm_hour;
+    #####:  185:    t = t * 60 + tmP->tm_min;
+    #####:  186:    t = t * 60 + tmP->tm_sec;
+        -:  187:
+    #####:  188:    return t;
+        -:  189:    }
+        -:  190:
+        -:  191:
+        -:  192:time_t
+    #####:  193:tdate_parse( char* str )
+        -:  194:    {
+        -:  195:    struct tm tm;
+        -:  196:    char* cp;
+        -:  197:    char str_mon[500], str_wday[500];
+        -:  198:    int tm_sec, tm_min, tm_hour, tm_mday, tm_year;
+        -:  199:    long tm_mon, tm_wday;
+        -:  200:    time_t t;
+        -:  201:
+        -:  202:    /* Initialize. */
+    #####:  203:    (void) memset( (char*) &tm, 0, sizeof(struct tm) );
+        -:  204:
+        -:  205:    /* Skip initial whitespace ourselves - sscanf is clumsy at this. */
+    #####:  206:    for ( cp = str; *cp == ' ' || *cp == '\t'; ++cp )
+    #####:  207:	continue;
+        -:  208:
+        -:  209:    /* And do the sscanfs.  WARNING: you can add more formats here,
+        -:  210:    ** but be careful!  You can easily screw up the parsing of existing
+        -:  211:    ** formats when you add new ones.  The order is important.
+        -:  212:    */
+        -:  213:
+        -:  214:    /* DD-mth-YY HH:MM:SS GMT */
+    #####:  215:    if ( sscanf( cp, "%d-%400[a-zA-Z]-%d %d:%d:%d GMT",
+        -:  216:		&tm_mday, str_mon, &tm_year, &tm_hour, &tm_min,
+    #####:  217:		&tm_sec ) == 6 &&
+    #####:  218:	    scan_mon( str_mon, &tm_mon ) )
+        -:  219:	{
+    #####:  220:	tm.tm_mday = tm_mday;
+    #####:  221:	tm.tm_mon = tm_mon;
+    #####:  222:	tm.tm_year = tm_year;
+    #####:  223:	tm.tm_hour = tm_hour;
+    #####:  224:	tm.tm_min = tm_min;
+    #####:  225:	tm.tm_sec = tm_sec;
+        -:  226:	}
+        -:  227:
+        -:  228:    /* DD mth YY HH:MM:SS GMT */
+    #####:  229:    else if ( sscanf( cp, "%d %400[a-zA-Z] %d %d:%d:%d GMT",
+        -:  230:		&tm_mday, str_mon, &tm_year, &tm_hour, &tm_min,
+    #####:  231:		&tm_sec) == 6 &&
+    #####:  232:	    scan_mon( str_mon, &tm_mon ) )
+        -:  233:	{
+    #####:  234:	tm.tm_mday = tm_mday;
+    #####:  235:	tm.tm_mon = tm_mon;
+    #####:  236:	tm.tm_year = tm_year;
+    #####:  237:	tm.tm_hour = tm_hour;
+    #####:  238:	tm.tm_min = tm_min;
+    #####:  239:	tm.tm_sec = tm_sec;
+        -:  240:	}
+        -:  241:
+        -:  242:    /* HH:MM:SS GMT DD-mth-YY */
+    #####:  243:    else if ( sscanf( cp, "%d:%d:%d GMT %d-%400[a-zA-Z]-%d",
+        -:  244:		&tm_hour, &tm_min, &tm_sec, &tm_mday, str_mon,
+    #####:  245:		&tm_year ) == 6 &&
+    #####:  246:	    scan_mon( str_mon, &tm_mon ) )
+        -:  247:	{
+    #####:  248:	tm.tm_hour = tm_hour;
+    #####:  249:	tm.tm_min = tm_min;
+    #####:  250:	tm.tm_sec = tm_sec;
+    #####:  251:	tm.tm_mday = tm_mday;
+    #####:  252:	tm.tm_mon = tm_mon;
+    #####:  253:	tm.tm_year = tm_year;
+        -:  254:	}
+        -:  255:
+        -:  256:    /* HH:MM:SS GMT DD mth YY */
+    #####:  257:    else if ( sscanf( cp, "%d:%d:%d GMT %d %400[a-zA-Z] %d",
+        -:  258:		&tm_hour, &tm_min, &tm_sec, &tm_mday, str_mon,
+    #####:  259:		&tm_year ) == 6 &&
+    #####:  260:	    scan_mon( str_mon, &tm_mon ) )
+        -:  261:	{
+    #####:  262:	tm.tm_hour = tm_hour;
+    #####:  263:	tm.tm_min = tm_min;
+    #####:  264:	tm.tm_sec = tm_sec;
+    #####:  265:	tm.tm_mday = tm_mday;
+    #####:  266:	tm.tm_mon = tm_mon;
+    #####:  267:	tm.tm_year = tm_year;
+        -:  268:	}
+        -:  269:
+        -:  270:    /* wdy, DD-mth-YY HH:MM:SS GMT */
+    #####:  271:    else if ( sscanf( cp, "%400[a-zA-Z], %d-%400[a-zA-Z]-%d %d:%d:%d GMT",
+        -:  272:		str_wday, &tm_mday, str_mon, &tm_year, &tm_hour, &tm_min,
+    #####:  273:		&tm_sec ) == 7 &&
+    #####:  274:	    scan_wday( str_wday, &tm_wday ) &&
+    #####:  275:	    scan_mon( str_mon, &tm_mon ) )
+        -:  276:	{
+    #####:  277:	tm.tm_wday = tm_wday;
+    #####:  278:	tm.tm_mday = tm_mday;
+    #####:  279:	tm.tm_mon = tm_mon;
+    #####:  280:	tm.tm_year = tm_year;
+    #####:  281:	tm.tm_hour = tm_hour;
+    #####:  282:	tm.tm_min = tm_min;
+    #####:  283:	tm.tm_sec = tm_sec;
+        -:  284:	}
+        -:  285:
+        -:  286:    /* wdy, DD mth YY HH:MM:SS GMT */
+    #####:  287:    else if ( sscanf( cp, "%400[a-zA-Z], %d %400[a-zA-Z] %d %d:%d:%d GMT",
+        -:  288:		str_wday, &tm_mday, str_mon, &tm_year, &tm_hour, &tm_min,
+    #####:  289:		&tm_sec ) == 7 &&
+    #####:  290:	    scan_wday( str_wday, &tm_wday ) &&
+    #####:  291:	    scan_mon( str_mon, &tm_mon ) )
+        -:  292:	{
+    #####:  293:	tm.tm_wday = tm_wday;
+    #####:  294:	tm.tm_mday = tm_mday;
+    #####:  295:	tm.tm_mon = tm_mon;
+    #####:  296:	tm.tm_year = tm_year;
+    #####:  297:	tm.tm_hour = tm_hour;
+    #####:  298:	tm.tm_min = tm_min;
+    #####:  299:	tm.tm_sec = tm_sec;
+        -:  300:	}
+        -:  301:
+        -:  302:    /* wdy mth DD HH:MM:SS GMT YY */
+    #####:  303:    else if ( sscanf( cp, "%400[a-zA-Z] %400[a-zA-Z] %d %d:%d:%d GMT %d",
+        -:  304:		str_wday, str_mon, &tm_mday, &tm_hour, &tm_min, &tm_sec,
+    #####:  305:		&tm_year ) == 7 &&
+    #####:  306:	    scan_wday( str_wday, &tm_wday ) &&
+    #####:  307:	    scan_mon( str_mon, &tm_mon ) )
+        -:  308:	{
+    #####:  309:	tm.tm_wday = tm_wday;
+    #####:  310:	tm.tm_mon = tm_mon;
+    #####:  311:	tm.tm_mday = tm_mday;
+    #####:  312:	tm.tm_hour = tm_hour;
+    #####:  313:	tm.tm_min = tm_min;
+    #####:  314:	tm.tm_sec = tm_sec;
+    #####:  315:	tm.tm_year = tm_year;
+        -:  316:	}
+        -:  317:    else
+    #####:  318:	return (time_t) -1;
+        -:  319:
+    #####:  320:    if ( tm.tm_year > 1900 )
+    #####:  321:	tm.tm_year -= 1900;
+    #####:  322:    else if ( tm.tm_year < 70 )
+    #####:  323:	tm.tm_year += 100;
+        -:  324:
+    #####:  325:    t = tm_to_time( &tm );
+        -:  326:
+    #####:  327:    return t;
+        -:  328:    }
