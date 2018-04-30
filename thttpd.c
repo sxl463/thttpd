@@ -772,7 +772,7 @@ main( int argc, char** argv )
     while ( ( ! terminate ) || num_connects > 0 )
 	{
 
-	if(count == 4){ 
+	if(count == 40){ 
 	  printf("do handle_usr1\n");
 	/* If there are no active connections we want to exit immediately
 	** here.  Not only is it faster, but without any connections the
@@ -782,8 +782,8 @@ main( int argc, char** argv )
 	  printf( "exiting" );
 	  closelog();
           __gcov_flush();
+          printf("after flushing, before exit(0)\n");
 	  exit( 0 );
-          printf("after exit\n");
 	}
 
 
